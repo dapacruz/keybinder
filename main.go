@@ -315,14 +315,17 @@ func main() {
 	// thread — required by WH_KEYBOARD_LL.
 	runtime.LockOSThread()
 
-	// Default to stderr so console (debug) builds log without any env var.
-	// In windowsgui builds stderr is discarded, so this is a no-op there.
-	logWriter = os.Stderr
-	if path := os.Getenv("KEY_REBINDER_LOG"); path != "" {
-		f, err := os.Create(path)
-		if err == nil {
-			logWriter = f
-			defer f.Close()
+	// Keystroke logging (stderr and KEY_REBINDER_LOG) only exists in debug
+	// builds — see logwriter_debug.go / logwriter_release.go. Release
+	// binaries have no way to log keystrokes, even if the env var is set.
+	if debugLoggingEnabled {
+		logWriter = os.Stderr
+		if path := os.Getenv("KEY_REBINDER_LOG"); path != "" {
+			f, err := os.Create(path)
+			if err == nil {
+				logWriter = f
+				defer f.Close()
+			}
 		}
 	}
 	debugf("key-rebinder debug log started")
