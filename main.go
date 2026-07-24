@@ -315,12 +315,12 @@ func main() {
 	// thread — required by WH_KEYBOARD_LL.
 	runtime.LockOSThread()
 
-	// Keystroke logging (stderr and KEY_REBINDER_LOG) only exists in debug
+	// Keystroke logging (stderr and KEYBINDER_LOG) only exists in debug
 	// builds — see logwriter_debug.go / logwriter_release.go. Release
 	// binaries have no way to log keystrokes, even if the env var is set.
 	if debugLoggingEnabled {
 		logWriter = os.Stderr
-		if path := os.Getenv("KEY_REBINDER_LOG"); path != "" {
+		if path := os.Getenv("KEYBINDER_LOG"); path != "" {
 			f, err := os.Create(path)
 			if err == nil {
 				logWriter = f
@@ -328,7 +328,7 @@ func main() {
 			}
 		}
 	}
-	debugf("key-rebinder debug log started")
+	debugf("keybinder debug log started")
 	debugf("INPUT size=%d ExtraInfo offset=%d",
 		unsafe.Sizeof(keyInput{}),
 		unsafe.Offsetof(keyInput{}.ExtraInfo))
@@ -337,7 +337,7 @@ func main() {
 	h, _, err := procSetWindowsHookExW.Call(whKeyboardLL, cb, 0, 0)
 	if h == 0 {
 		msg, _ := syscall.UTF16PtrFromString(err.Error())
-		title, _ := syscall.UTF16PtrFromString("key-rebinder")
+		title, _ := syscall.UTF16PtrFromString("keybinder")
 		procMessageBoxW.Call(0, uintptr(unsafe.Pointer(msg)), uintptr(unsafe.Pointer(title)), 0x10)
 		os.Exit(1)
 	}

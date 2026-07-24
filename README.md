@@ -1,4 +1,4 @@
-# key-rebinder
+# keybinder
 
 A tiny Windows background utility, written in Go, that turns **Caps Lock** and
 **Enter** into dual-role keys:
@@ -38,7 +38,7 @@ Requires Go (see `go.mod` for the minimum version) and cross-compiles from
 any platform since it only needs `GOOS=windows`.
 
 ```sh
-make            # builds key-rebinder.exe (amd64) and key-rebinder-arm64.exe
+make            # builds keybinder.exe (amd64) and keybinder-arm64.exe
 make clean      # removes built binaries
 ```
 
@@ -54,7 +54,7 @@ make debug-arm64.exe  # arm64, console subsystem, -tags debug
 
 Debug builds keep a visible console (so `stderr` is visible) and compile in
 keystroke logging via the `debug` build tag (`logwriter_debug.go` /
-`logwriter_release.go`). With a debug build, set `KEY_REBINDER_LOG=<path>`
+`logwriter_release.go`). With a debug build, set `KEYBINDER_LOG=<path>`
 to log to a file instead of stderr.
 
 ## Running
