@@ -82,14 +82,16 @@ var (
 )
 
 // Grace-period state (protected by graceMu).
-// After a tap detection, Escape is deferred for graceWindow so that a chord
-// key arriving in that window is handled as Ctrl+key instead.
+// After a tap detection, the tap key is deferred for graceWindow so that a
+// chord key arriving in that window is handled as modVk+key instead.
 var (
-	graceMu      sync.Mutex
-	gracePending bool         // tap seen; timer running, no chord key yet
-	graceCtrl    bool         // chord key arrived; LCtrl injected, waiting for key-up
-	graceTimer   *time.Timer
-	graceKeys    int          // keys currently held in graceCtrl mode
+	graceMu       sync.Mutex
+	gracePending  bool         // tap seen; timer running, no chord key yet
+	graceCtrl     bool         // chord key arrived; modVk injected, waiting for key-up
+	graceTimer    *time.Timer
+	graceKeys     int          // keys currently held in graceCtrl mode
+	graceSourceVk uint32       // which dual-role key started the grace period
+	graceModVk    uint16       // modifier to inject/release in grace ctrl mode
 )
 
 func debugf(format string, args ...any) {
@@ -98,21 +100,13 @@ func debugf(format string, args ...any) {
 	}
 }
 
-func injectEscape() {
-	buf := [2]keyInput{
-		syntheticKey(vkEscape, false),
-		syntheticKey(vkEscape, true),
-	}
-	procSendInput.Call(2, uintptr(unsafe.Pointer(&buf[0])), unsafe.Sizeof(buf[0]))
-	runtime.KeepAlive(buf)
-	debugf("  grace timeout: injected Escape")
-}
-
-func startGrace() {
+func startGrace(sourceVk uint32, modVk uint16, tapVk uint16) {
 	graceMu.Lock()
 	gracePending = true
 	graceCtrl = false
 	graceKeys = 0
+	graceSourceVk = sourceVk
+	graceModVk = modVk
 	graceTimer = time.AfterFunc(graceWindow, func() {
 		graceMu.Lock()
 		if !gracePending {
@@ -122,10 +116,17 @@ func startGrace() {
 		gracePending = false
 		graceTimer = nil
 		graceMu.Unlock()
-		injectEscape()
+		// Fire the deferred tap (down+up).
+		buf := [2]keyInput{
+			syntheticKey(tapVk, false),
+			syntheticKey(tapVk, true),
+		}
+		procSendInput.Call(2, uintptr(unsafe.Pointer(&buf[0])), unsafe.Sizeof(buf[0]))
+		runtime.KeepAlive(buf)
+		debugf("  grace timeout: injected tap vk=0x%02X", tapVk)
 	})
 	graceMu.Unlock()
-	debugf("  grace period started (%v)", graceWindow)
+	debugf("  grace period started (%v) src=0x%02X mod=0x%02X tap=0x%02X", graceWindow, sourceVk, modVk, tapVk)
 }
 
 func hookProc(nCode, wParam, lParam uintptr) uintptr {
@@ -137,8 +138,8 @@ func hookProc(nCode, wParam, lParam uintptr) uintptr {
 		if !isSentinel {
 			isDown := wParam == wmKeyDown || wParam == wmSysKeyDown
 
-			// Non-Caps keys during grace period.
-			if ks.VkCode != vkCapital {
+			// Non-dual-role keys during grace period.
+			if !isDualRoleKey(ks.VkCode) {
 				graceMu.Lock()
 				switch {
 				case gracePending:
@@ -146,6 +147,7 @@ func hookProc(nCode, wParam, lParam uintptr) uintptr {
 					stopped := graceTimer != nil && graceTimer.Stop()
 					graceTimer = nil
 					if stopped {
+						modVk := graceModVk
 						gracePending = false
 						graceCtrl = true
 						if isDown {
@@ -153,20 +155,21 @@ func hookProc(nCode, wParam, lParam uintptr) uintptr {
 						}
 						graceMu.Unlock()
 						if isDown {
-							debugf("  grace→ctrl: LCtrl+vk=0x%02X", ks.VkCode)
+							debugf("  grace→ctrl: mod=0x%02X+vk=0x%02X", modVk, ks.VkCode)
 							var buf [2]keyInput
-							buf[0] = syntheticKey(vkLControl, false)
+							buf[0] = syntheticKey(modVk, false)
 							buf[1] = reInjectKey(ks, !isDown)
 							procSendInput.Call(2, uintptr(unsafe.Pointer(&buf[0])), unsafe.Sizeof(buf[0]))
 							runtime.KeepAlive(buf)
 						}
 						return 1
 					}
-					// Timer already fired (Escape sent): pass through as normal key.
+					// Timer already fired (tap sent): pass through as normal key.
 					gracePending = false
 					graceMu.Unlock()
 
 				case graceCtrl:
+					modVk := graceModVk
 					if isDown {
 						graceKeys++
 						graceMu.Unlock()
@@ -183,10 +186,10 @@ func hookProc(nCode, wParam, lParam uintptr) uintptr {
 						}
 						graceMu.Unlock()
 						if done {
-							debugf("  grace ctrl last key up vk=0x%02X, releasing LCtrl", ks.VkCode)
+							debugf("  grace ctrl last key up vk=0x%02X, releasing mod=0x%02X", ks.VkCode, modVk)
 							var buf [2]keyInput
 							buf[0] = reInjectKey(ks, true)
-							buf[1] = syntheticKey(vkLControl, true)
+							buf[1] = syntheticKey(modVk, true)
 							procSendInput.Call(2, uintptr(unsafe.Pointer(&buf[0])), unsafe.Sizeof(buf[0]))
 							runtime.KeepAlive(buf)
 						} else {
@@ -203,35 +206,56 @@ func hookProc(nCode, wParam, lParam uintptr) uintptr {
 				}
 			}
 
-			// CapsDown during a pending grace: fire the deferred Escape first,
-			// then process CapsDown normally (double-tap path).
-			if ks.VkCode == vkCapital && isDown {
+			// Re-press of the grace-source key during pending grace: fire the
+			// deferred tap first, then process this press normally (double-tap path).
+			if isDualRoleKey(ks.VkCode) && isDown {
 				graceMu.Lock()
-				if gracePending {
+				if gracePending && ks.VkCode == graceSourceVk {
 					fired := graceTimer == nil || !graceTimer.Stop()
 					gracePending = false
 					graceTimer = nil
 					graceMu.Unlock()
 					if !fired {
-						injectEscape()
+						// Timer didn't fire yet — inject the tap ourselves.
+						dk := dualKeys[0] // graceSourceVk is always the first useGrace key
+						for _, d := range dualKeys {
+							if d.vk == ks.VkCode {
+								dk = d
+								break
+							}
+						}
+						buf := [2]keyInput{
+							syntheticKey(dk.tapVk, false),
+							syntheticKey(dk.tapVk, true),
+						}
+						procSendInput.Call(2, uintptr(unsafe.Pointer(&buf[0])), unsafe.Sizeof(buf[0]))
+						runtime.KeepAlive(buf)
+						debugf("  grace cancelled by re-press: injected tap vk=0x%02X", dk.tapVk)
 					}
-					// If fired==true the timer callback already sent Escape.
+					// If fired==true the timer callback already sent the tap.
 				} else {
 					graceMu.Unlock()
 				}
 			}
 
-			suppress, pre := step(ks.VkCode, isDown)
+			suppress, pre, grace := step(ks.VkCode, isDown)
 			if suppress {
-				// Tap result: defer Escape via grace period.
-				if len(pre) > 0 && pre[0].vk == vkEscape {
-					startGrace()
+				// Tap with grace: defer injection through the grace period.
+				if grace {
+					dk := dualKeys[0]
+					for _, d := range dualKeys {
+						if d.vk == ks.VkCode {
+							dk = d
+							break
+						}
+					}
+					startGrace(ks.VkCode, dk.modVk, dk.tapVk)
 					return 1
 				}
 
 				// Batch all events into one SendInput call — MSDN guarantees
 				// events within a single call are never interleaved with other
-				// input, ensuring LCtrl_Down immediately precedes the key.
+				// input, ensuring the modifier immediately precedes the key.
 				var buf [8]keyInput
 				n := 0
 				for _, a := range pre {
@@ -239,7 +263,7 @@ func hookProc(nCode, wParam, lParam uintptr) uintptr {
 					debugf("  inject synthetic vk=0x%02X keyUp=%v", a.vk, a.keyUp)
 					n++
 				}
-				if ks.VkCode != vkCapital {
+				if !isDualRoleKey(ks.VkCode) {
 					buf[n] = reInjectKey(ks, !isDown)
 					debugf("  reinject vk=0x%02X keyUp=%v", ks.VkCode, !isDown)
 					n++
